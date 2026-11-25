@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>直播即時翻譯</title>
+<style>
+  :root { --bg:#14161a; --card:#1e2127; --fg:#eceff4; --sub:#9aa3b2; --accent:#5aa9ff; --size:28px; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,"Noto Sans TC",sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:16px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:14px; }
+  select, button, input { font:inherit; color:var(--fg); background:var(--card); border:1px solid #333a45; border-radius:8px; padding:8px 12px; }
+  button { cursor:pointer; background:var(--accent); color:#06121f; border:none; font-weight:600; }
+  button.stop { background:#ff6b6b; }
+  button.ghost { background:var(--card); color:var(--fg); border:1px solid #333a45; font-weight:400; }
+  #status { color:var(--sub); font-size:14px; margin-bottom:10px; min-height:20px; }
+  #live { background:var(--card); border-radius:12px; padding:16px; min-height:120px; margin-bottom:14px; }
+  #liveTrans { font-size:var(--size); line-height:1.4; font-weight:600; }
+  #liveOrig { color:var(--sub); margin-top:8px; font-size:calc(var(--size) * .6); }
+  .line { border-top:1px solid #2a2f38; padding:10px 2px; }
+  .line .t { font-size:calc(var(--size) * .8); }
+  .line .o { color:var(--sub); font-size:calc(var(--size) * .5); margin-top:2px; }
+  label.s { display:flex; align-items:center; gap:8px; color:var(--sub); font-size:14px; }
+  input[type=range] { padding:0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <label class="s">直播語言
+      <select id="src">
+        <option value="ja-JP">日本語</option>
+        <option value="en-US">English</option>
+        <option value="ko-KR">한국어</option>
+        <option value="zh-CN">中文（普通話）</option>
+        <option value="th-TH">ไทย</option>
+        <option value="vi-VN">Tiếng Việt</option>
+        <option value="es-ES">Español</option>
+        <option value="id-ID">Bahasa Indonesia</option>
+      </select>
+    </label>
+    <label class="s">翻譯成
+      <select id="tl">
+        <option value="zh-TW">繁體中文</option>
+        <option value="zh-CN">簡體中文</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+      </select>
+    </label>
+    <button id="go">開始聽</button>
+    <button id="clear" class="ghost">清除記錄</button>
+    <label class="s">字體 <input id="size" type="range" min="16" max="56" value="28"></label>
+  </div>
+  <div id="status">按「開始聽」後，請允許麥克風。播放直播的聲音要讓這台電腦的麥克風聽得到。</div>
+  <div id="live">
+    <div id="liveTrans"></div>
+    <div id="liveOrig"></div>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, running = false, seq = 0, interimTimer = null;
+
+if (!SR) {
+  $("status").textContent = "這個瀏覽器不支援語音辨識，請用電腦版 Chrome 或 Edge 開啟。";
+  $("go").disabled = true;
+}
+
+async function translate(text) {
+  const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&dt=t&tl=" +
+    encodeURIComponent($("tl").value) + "&q=" + encodeURIComponent(text);
+  try {
+    const d = await (await fetch(url)).json();
+    return d[0].map((x) => x[0]).join("");
+  } catch (e) {
+    return "（翻譯失敗，請檢查網路）";
+  }
+}
+
+function addLine(text) {
+  if (!text) return;
+  const row = document.createElement("div");
+  row.className = "line";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = "…";
+  const o = document.createElement("div"); o.className = "o"; o.textContent = text;
+  row.append(t, o);
+  $("log").prepend(row);
+  translate(text).then((out) => {
+    t.textContent = out;
+    $("liveTrans").textContent = out;
+  });
+}
+
+function translateInterim(text) {
+  clearTimeout(interimTimer);
+  interimTimer = setTimeout(async () => {
+    const mine = ++seq;
+    const out = await translate(text);
+    if (mine === seq) $("liveTrans").textContent = out;
+  }, 500);
+}
+
+function start() {
+  rec = new SR();
+  rec.lang = $("src").value;
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) addLine(r[0].transcript.trim());
+      else interim += r[0].transcript;
+    }
+    $("liveOrig").textContent = interim;
+    if (interim) translateInterim(interim);
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      running = false;
+      $("status").textContent = "麥克風被封鎖，請在網址列允許麥克風後再試一次。";
+      setUi();
+    }
+  };
+  rec.onend = () => {
+    if (running) setTimeout(() => { try { rec.start(); } catch (e) {} }, 200);
+  };
+  rec.start();
+}
+
+function setUi() {
+  $("go").textContent = running ? "停止" : "開始聽";
+  $("go").classList.toggle("stop", running);
+  if (running) $("status").textContent = "聽取中…（辨識語言：" + $("src").selectedOptions[0].text + "）";
+}
+
+$("go").onclick = () => {
+  if (running) {
+    running = false;
+    rec && rec.stop();
+    $("status").textContent = "已停止。";
+    setUi();
+  } else {
+    running = true;
+    start();
+    setUi();
+  }
+};
+
+$("src").onchange = () => {
+  if (running) { rec.onend = null; rec.stop(); start(); setUi(); }
+};
+
+$("clear").onclick = () => {
+  $("log").textContent = "";
+  $("liveTrans").textContent = "";
+  $("liveOrig").textContent = "";
+};
+
+$("size").oninput = (e) => document.documentElement.style.setProperty("--size", e.target.value + "px");
+</script>
+</body>
+</html>
